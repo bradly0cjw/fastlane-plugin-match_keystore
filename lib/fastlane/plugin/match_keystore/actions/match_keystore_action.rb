@@ -538,6 +538,9 @@ module Fastlane
             FileUtils.remove_dir(keystore_path)
           end
 
+          # Ensure the keystore app directory exists
+          FileUtils.mkdir_p(keystoreAppDir)
+
           key_password = self.prompt2(text: "Keystore Password: ", value: data_key_password)
           if key_password.to_s.strip.empty?
             raise "Keystore Password is not definined!"
