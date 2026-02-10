@@ -55,8 +55,8 @@ module Fastlane
 
       def self.load_properties(properties_filename)
         properties = {}
-        File.open(properties_filename, 'r') do |properties_file|
-          properties_file.read.each_line do |line|
+        File.open(properties_filename, 'r:utf-8') do |properties_file|
+          properties_file.read.encode('UTF-8', invalid: :replace, undef: :replace).each_line do |line|
             line.strip!
             if (line[0] != ?# and line[0] != ?=)
               i = line.index('=')
@@ -171,8 +171,12 @@ module Fastlane
       def self.decrypt_file(encrypt_file, clear_file, key_path, forceOpenSSL)
         FileUtils.rm_f(clear_file)
         openssl_bin = self.openssl(forceOpenSSL)
-        run_command(openssl_bin, "enc", "-d", "-aes-256-cbc", "-pbkdf2",
-                    "-in", encrypt_file, "-out", clear_file, "-pass", "file:#{key_path}")
+        output, status = Open3.capture2e(openssl_bin, "enc", "-d", "-aes-256-cbc", "-pbkdf2",
+                                         "-in", encrypt_file, "-out", clear_file, "-pass", "file:#{key_path}")
+        unless status.success?
+          raise "Decryption failed (exit #{status.exitstatus}): #{output.strip}. " \
+                "Ensure your match_secret is correct and the encrypted file is not corrupted."
+        end
       end
 
       def self.assert_equals(test_name, excepted, value)
