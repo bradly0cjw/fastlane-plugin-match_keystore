@@ -683,7 +683,7 @@ module Fastlane
           end 
         end
 
-        UI.message("No APK or AAB file to sign, or signing skipped.")
+        UI.message("Keystore is configured.")
         keystore_path
       end
 
