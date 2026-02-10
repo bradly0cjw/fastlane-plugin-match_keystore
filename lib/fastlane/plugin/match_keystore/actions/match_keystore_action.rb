@@ -4,6 +4,7 @@ require 'os'
 require 'json'
 require 'pry'
 require 'digest'
+require 'open3'
 require_relative '../helper/match_keystore_helper'
 
 module Fastlane
@@ -19,6 +20,22 @@ module Fastlane
 
       KEY_VERSION = "2"
       OPENSSL_BIN_PATH_MAC = "/usr/local/opt/openssl@1.1/bin"
+
+      def self.run_command(*args)
+        output, status = Open3.capture2e(*args)
+        unless status.success?
+          UI.important("Command failed (exit #{status.exitstatus}): #{args.join(' ')}")
+        end
+        output
+      end
+
+      def self.tool_executable(build_tools_path, tool_name)
+        if OS.windows?
+          File.join(build_tools_path, "#{tool_name}.bat")
+        else
+          File.join(build_tools_path, tool_name)
+        end
+      end
 
       def self.to_md5(value)
         hash_value = Digest::MD5.hexdigest value
@@ -49,33 +66,28 @@ module Fastlane
                 properties[line] = ''
               end
             end
-          end      
+          end
         end
         properties
       end
 
       def self.get_android_home
-        `rm -f android_home.txt`
-        `echo $ANDROID_HOME > android_home.txt`
-        data = File.read("android_home.txt")
-        android_home = data.strip
-        `rm -f android_home.txt`
-        android_home
+        ENV['ANDROID_HOME'].to_s.strip
       end
 
       def self.get_build_tools_version(targeted_version)
         path = self.get_build_tools(targeted_version)
-        version = path.split('/').last
+        version = File.basename(path.chomp('/').chomp('\\'))
         version
       end
 
       def self.get_build_tools(targeted_version)
         android_home = self.get_android_home()
-        build_tools_root = File.join(android_home, '/build-tools')
+        build_tools_root = File.join(android_home, 'build-tools')
 
         build_tools_path = ""
         if !targeted_version.to_s.strip.empty?
-          build_tools_path = File.join(build_tools_root, "/#{targeted_version}/")
+          build_tools_path = File.join(build_tools_root, targeted_version, '')
         end
 
         if !File.directory?(build_tools_path)
@@ -86,16 +98,16 @@ module Fastlane
           end
           build_tools_path = build_tools_last_version
         end
-      
+
         build_tools_path
       end
-      
+
       def self.check_ssl_version(forceOpenSSL)
         libressl_min = '2.9'
         openssl_min = '1.1.1'
 
         openssl = self.openssl(forceOpenSSL)
-        output = `#{openssl} version`
+        output = run_command(openssl, "version")
         if !output.start_with?("LibreSSL") && !output.start_with?("OpenSSL")
           raise "Please install OpenSSL '#{openssl_min}' at least OR LibreSSL #{libressl_min}' at least"
         end
@@ -118,9 +130,12 @@ module Fastlane
       end
 
       def self.openssl(forceOpenSSL)
-        if forceOpenSSL
+        if forceOpenSSL && !OS.windows?
           output = "#{self::OPENSSL_BIN_PATH_MAC}/openssl"
         else
+          if forceOpenSSL && OS.windows?
+            UI.important("forceOpenSSL is not supported on Windows, using openssl from PATH")
+          end
           output = "openssl"
         end
         output
@@ -129,7 +144,7 @@ module Fastlane
       def self.is_libre_ssl(forceOpenSSL)
         result = false
         openssl = self.openssl(forceOpenSSL)
-        output = `#{openssl} version`
+        output = run_command(openssl, "version")
         if output.start_with?("LibreSSL")
           result = true
         end
@@ -137,28 +152,27 @@ module Fastlane
       end
 
       def self.gen_key(key_path, password, compat_key)
-        `rm -f '#{key_path}'`
+        FileUtils.rm_f(key_path)
         shaValue = self.sha512(password)
         # Backward-compatibility
         if compat_key == "1"
-          `echo "#{password}" | openssl dgst -sha512 | awk '{print $2}' | cut -c1-128 > '#{key_path}'`
-        else
-          `echo "#{shaValue}" > '#{key_path}'`
+          shaValue = Digest::SHA512.hexdigest("#{password}\n")
         end
+        File.write(key_path, shaValue + "\n")
       end
 
       def self.encrypt_file(clear_file, encrypt_file, key_path, forceOpenSSL)
-        `rm -f '#{encrypt_file}'`
-        libre_ssl = self.is_libre_ssl(forceOpenSSL)
+        FileUtils.rm_f(encrypt_file)
         openssl_bin = self.openssl(forceOpenSSL)
-        `#{openssl_bin} enc -aes-256-cbc -salt -pbkdf2 -in '#{clear_file}' -out '#{encrypt_file}' -pass file:'#{key_path}'`
+        run_command(openssl_bin, "enc", "-aes-256-cbc", "-salt", "-pbkdf2",
+                    "-in", clear_file, "-out", encrypt_file, "-pass", "file:#{key_path}")
       end
 
       def self.decrypt_file(encrypt_file, clear_file, key_path, forceOpenSSL)
-        `rm -f '#{clear_file}'`
-        libre_ssl = self.is_libre_ssl(forceOpenSSL)
+        FileUtils.rm_f(clear_file)
         openssl_bin = self.openssl(forceOpenSSL)
-        `#{openssl_bin} enc -d -aes-256-cbc -pbkdf2 -in '#{encrypt_file}' -out '#{clear_file}' -pass file:'#{key_path}'`
+        run_command(openssl_bin, "enc", "-d", "-aes-256-cbc", "-pbkdf2",
+                    "-in", encrypt_file, "-out", clear_file, "-pass", "file:#{key_path}")
       end
 
       def self.assert_equals(test_name, excepted, value)
@@ -175,9 +189,9 @@ module Fastlane
       def self.test_security
 
         self.check_ssl_version(false)
-        
+
         # Clear temp files
-        temp_dir = File.join(Dir.pwd, '/temp/')
+        temp_dir = File.join(Dir.pwd, 'temp')
         FileUtils.rm_rf(temp_dir)
         Dir.mkdir(temp_dir)
 
@@ -193,12 +207,12 @@ module Fastlane
         self.assert_equals("SHA-512", excepted, shaValue)
 
         # Check SHA-512-File
-        key_path = File.join(Dir.pwd, '/temp/key.txt')
+        key_path = File.join(Dir.pwd, 'temp', 'key.txt')
         self.gen_key(key_path, fakeValue, false)
         shaValue = self.get_file_content(key_path).strip!
         excepted = "cc6a7b0d89cc61c053f7018a305672bdb82bc07e5015f64bb063d9662be4ec81ec8afa819b009de266482b6bd56b7068def2524c32f5b5d4d9db49ee4578499d"
         self.assert_equals("SHA-512-File", excepted, shaValue)
-        
+
 
         # Check LibreSSL
         result = self.is_libre_ssl(false)
@@ -207,15 +221,15 @@ module Fastlane
         self.assert_equals("Is-LibreSSL", false, result)
 
         # Encrypt OpenSSL
-        clear_file = File.join(Dir.pwd, '/temp/clear.txt')
-        openssl_encrypt_file = File.join(Dir.pwd, '/temp/openssl_encrypted.txt')
+        clear_file = File.join(Dir.pwd, 'temp', 'clear.txt')
+        openssl_encrypt_file = File.join(Dir.pwd, 'temp', 'openssl_encrypted.txt')
         self.content_to_file(clear_file, fakeValue)
         self.encrypt_file(clear_file, openssl_encrypt_file, key_path, true)
         result = File.file?(openssl_encrypt_file) && File.size(openssl_encrypt_file) > 10
         self.assert_equals("Encrypt-OpenSSL", true, result)
 
         # Encrypt LibreSSL
-        encrypt_file_libre = File.join(Dir.pwd, '/temp/libressl_encrypted.txt')
+        encrypt_file_libre = File.join(Dir.pwd, 'temp', 'libressl_encrypted.txt')
         self.content_to_file(clear_file, fakeValue)
         self.encrypt_file(clear_file, encrypt_file_libre, key_path, false)
         result = File.file?(encrypt_file_libre) && File.size(encrypt_file_libre) > 10
@@ -224,25 +238,25 @@ module Fastlane
         # exit!
 
         # Decrypt OpenSSL (from OpenSSL)
-        openssl_clear_file = File.join(Dir.pwd, '/temp/openssl_clear.txt')
+        openssl_clear_file = File.join(Dir.pwd, 'temp', 'openssl_clear.txt')
         self.decrypt_file(openssl_encrypt_file, openssl_clear_file, key_path, true)
         decrypted = self.get_file_content(openssl_clear_file).strip!
         self.assert_equals("Decrypt-OpenSSL", fakeValue, decrypted)
 
         # Decrypt LibreSSL (from LibreSSL)
-        libressl_clear_file = File.join(Dir.pwd, '/temp/libressl_clear.txt')
+        libressl_clear_file = File.join(Dir.pwd, 'temp', 'libressl_clear.txt')
         self.decrypt_file(encrypt_file_libre, libressl_clear_file, key_path, false)
         decrypted = self.get_file_content(libressl_clear_file).strip!
         self.assert_equals("Decrypt-LibreSSL", fakeValue, decrypted)
 
         # Decrypt LibreSSL (from OpenSSL)
-        libressl_clear_file = File.join(Dir.pwd, '/temp/libressl_from_openssl_clear.txt')
+        libressl_clear_file = File.join(Dir.pwd, 'temp', 'libressl_from_openssl_clear.txt')
         self.decrypt_file(openssl_encrypt_file, libressl_clear_file, key_path, false)
         decrypted = self.get_file_content(libressl_clear_file).strip!
         self.assert_equals("Decrypt-LibreSSL-from-OpenSSL", fakeValue, decrypted)
 
         # Decrypt OpenSSL (from LibreSSL)
-        openssl_clear_file = File.join(Dir.pwd, '/temp/openssl_from_libressl_clear.txt')
+        openssl_clear_file = File.join(Dir.pwd, 'temp', 'openssl_from_libressl_clear.txt')
         self.decrypt_file(encrypt_file_libre, openssl_clear_file, key_path, true)
         decrypted = self.get_file_content(openssl_clear_file).strip!
         self.assert_equals("Decrypt-OpenSSL-from-LibreSSL", fakeValue, decrypted)
@@ -258,21 +272,31 @@ module Fastlane
         apk_path_signed = apk_path.gsub(".apk", "-signed.apk")
         apk_path_signed = apk_path_signed.gsub("unsigned", "")
         apk_path_signed = apk_path_signed.gsub("--", "-")
-        `rm -f '#{apk_path_signed}'`
+        FileUtils.rm_f(apk_path_signed)
 
         UI.message("Signing APK (input): #{apk_path}")
-        apksigner_opts = ""
+        apksigner_opts = []
         build_tools_version = self.get_build_tools_version(version_targeted)
         UI.message("Build-tools version: #{build_tools_version}")
         if Gem::Version.new(build_tools_version) >= Gem::Version.new('30')
-          apksigner_opts = "--v4-signing-enabled false "
+          apksigner_opts = ["--v4-signing-enabled", "false"]
         end
-        output = `#{build_tools_path}apksigner sign --ks '#{keystore_path}' --ks-key-alias '#{alias_name}' --ks-pass pass:'#{key_password}' --key-pass pass:'#{alias_password}' --v1-signing-enabled true --v2-signing-enabled true #{apksigner_opts}--out '#{apk_path_signed}' '#{apk_path}'`
+        apksigner = self.tool_executable(build_tools_path, "apksigner")
+        output = run_command(apksigner, "sign",
+                             "--ks", keystore_path,
+                             "--ks-key-alias", alias_name,
+                             "--ks-pass", "pass:#{key_password}",
+                             "--key-pass", "pass:#{alias_password}",
+                             "--v1-signing-enabled", "true",
+                             "--v2-signing-enabled", "true",
+                             *apksigner_opts,
+                             "--out", apk_path_signed,
+                             apk_path)
         puts ""
         puts output
 
         UI.message("Verifing APK signature (output): #{apk_path_signed}")
-        output = `#{build_tools_path}apksigner verify '#{apk_path_signed}'`
+        output = run_command(apksigner, "verify", apk_path_signed)
         puts ""
         puts output
 
@@ -280,9 +304,10 @@ module Fastlane
         # https://developer.android.com/studio/command-line/zipalign
         if zip_align != false
           apk_path_aligned = apk_path_signed.gsub(".apk", "-aligned.apk")
-          `rm -f '#{apk_path_aligned}'`
+          FileUtils.rm_f(apk_path_aligned)
           UI.message("Aligning APK (zipalign): #{apk_path_signed}")
-          output = `#{build_tools_path}zipalign -v 4 '#{apk_path_signed}' '#{apk_path_aligned}'`
+          zipalign = self.tool_executable(build_tools_path, "zipalign")
+          output = run_command(zipalign, "-v", "4", apk_path_signed, apk_path_aligned)
           puts ""
           puts output
 
@@ -290,26 +315,31 @@ module Fastlane
             raise "Aligned APK not exists!"
           end
 
-          `rm -f '#{apk_path_signed}'`
+          FileUtils.rm_f(apk_path_signed)
           apk_path_signed = apk_path_aligned
-  
+
         else
           UI.message("No zip align - deactivated via parameter!")
         end
 
         apk_path_signed
-      end 
+      end
 
       def self.sign_aab(aab_path, keystore_path, key_password, alias_name, alias_password)
 
         aab_path_signed = aab_path.gsub('.aab', '-signed.aab')
         aab_path_signed = aab_path_signed.gsub('unsigned', '')
         aab_path_signed = aab_path_signed.gsub('--', '-')
-        `rm -f '#{aab_path_signed}'`
+        FileUtils.rm_f(aab_path_signed)
 
         UI.message("Signing AAB (input): #{aab_path}")
-        aabsigner_opts = ""
-        output = `jarsigner -keystore '#{keystore_path}' -storepass '#{key_password}' -keypass '#{alias_password}' -signedjar '#{aab_path_signed}' '#{aab_path}' '#{alias_name}'`
+        output = run_command("jarsigner",
+                             "-keystore", keystore_path,
+                             "-storepass", key_password,
+                             "-keypass", alias_password,
+                             "-signedjar", aab_path_signed,
+                             aab_path,
+                             alias_name)
         puts ""
         puts output
 
@@ -331,7 +361,7 @@ module Fastlane
       end
 
       def self.content_to_file(file_path, content)
-        `echo #{content} > #{file_path}`
+        File.write(file_path, content + "\n")
       end
 
       def self.get_file_content(file_path)
@@ -343,7 +373,7 @@ module Fastlane
 
         # Set default AAB path if not set:
         if aab_path.to_s.strip.empty?
-          aab_path = '/app/build/outputs/bundle/release/'
+          aab_path = File.join('app', 'build', 'outputs', 'bundle', 'release')
         end
 
         if !aab_path.to_s.end_with?('.aab')
@@ -371,10 +401,10 @@ module Fastlane
 
         # Set default APK path if not set:
         if apk_path.to_s.strip.empty?
-          apk_path = '/app/build/outputs/apk/'
+          apk_path = File.join('app', 'build', 'outputs', 'apk')
         end
 
-        if !apk_path.to_s.end_with?(".apk") 
+        if !apk_path.to_s.end_with?(".apk")
 
           apk_path = self.resolve_dir(apk_path)
 
@@ -382,7 +412,7 @@ module Fastlane
           files = Dir[pattern]
 
           for file in files
-            if file.to_s.end_with?(".apk") && !file.to_s.end_with?("-signed.apk")  
+            if file.to_s.end_with?(".apk") && !file.to_s.end_with?("-signed.apk")
               apk_path = file
               break
             end
@@ -391,7 +421,7 @@ module Fastlane
         else
           apk_path = self.resolve_file(apk_path)
         end
-        
+
         apk_path
       end
 
@@ -449,8 +479,8 @@ module Fastlane
           UI.message("Compatiblity version: #{compat_key}")
         end
 
-        # Init workign local directory:
-        dir_name = ENV['HOME'] + '/.match_keystore'
+        # Init working local directory:
+        dir_name = File.join(Dir.home, '.match_keystore')
         unless File.directory?(dir_name)
           UI.message("Creating '.match_keystore' working directory...")
           FileUtils.mkdir_p(dir_name)
@@ -506,13 +536,13 @@ module Fastlane
         properties_encrypt_path = File.join(keystoreAppDir, properties_encrypt_name)
 
         # Cloning/pulling GIT remote repository:
-        gitDir = File.join(repo_dir, '/.git')
+        gitDir = File.join(repo_dir, '.git')
         if !File.directory?(gitDir)
           UI.message("Cloning remote Keystores repository...")
-          `git clone #{git_url} #{repo_dir}`
+          run_command("git", "clone", git_url, repo_dir)
         else
           UI.message("Pulling remote Keystores repository...")
-          `cd #{repo_dir} && git pull`
+          run_command("git", "-C", repo_dir, "pull")
         end
 
         # Load parameters from JSON for CI or Unit Tests:
@@ -532,7 +562,7 @@ module Fastlane
         # Create keystore with command
         override_keystore = !existing_keystore.to_s.strip.empty? && File.file?(existing_keystore)
         UI.message("Existing Keystore: #{existing_keystore}")
-        if !File.file?(keystore_path) || override_keystore 
+        if !File.file?(keystore_path) || override_keystore
 
           if File.file?(keystore_path)
             FileUtils.remove_dir(keystore_path)
@@ -557,35 +587,33 @@ module Fastlane
           # https://developer.android.com/studio/publish/app-signing
           if existing_keystore.to_s.strip.empty? || !File.file?(existing_keystore)
             UI.message("Generating Android Keystore...")
-            
+
             full_name = self.prompt2(text: "Certificate First and Last Name: ", value: data_full_name)
             org_unit = self.prompt2(text: "Certificate Organisation Unit: ", value: data_org_unit)
             org = self.prompt2(text: "Certificate Organisation: ", value: data_org)
-            city_locality = self.prompt2(text: "Certificate City or Locality: ", value: data_city_locality) 
+            city_locality = self.prompt2(text: "Certificate City or Locality: ", value: data_city_locality)
             state_province = self.prompt2(text: "Certificate State or Province: ", value: data_state_province)
             country = self.prompt2(text: "Certificate Country Code (XX): ", value: data_country)
-            
-            keytool_parts = [
-              "keytool -genkey -v",
-              "-keystore '#{keystore_path}'",
-              "-alias '#{alias_name}'",
-              "-keyalg RSA -keysize 2048 -validity 10000",
-              "-storepass '#{alias_password}'",
-              "-keypass '#{key_password}'",
-              "-dname \"CN=#{full_name}, OU=#{org_unit}, O=#{org}, L=#{city_locality}, S=#{state_province}, C=#{country}\"",
-            ]
-            sh keytool_parts.join(" ")
+
+            dname = "CN=#{full_name}, OU=#{org_unit}, O=#{org}, L=#{city_locality}, S=#{state_province}, C=#{country}"
+            run_command("keytool", "-genkey", "-v",
+                        "-keystore", keystore_path,
+                        "-alias", alias_name,
+                        "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
+                        "-storepass", alias_password,
+                        "-keypass", key_password,
+                        "-dname", dname)
           else
-            UI.message("Copy existing keystore to match_keystore repository...") 
-            `cp #{existing_keystore} #{keystore_path}`
+            UI.message("Copy existing keystore to match_keystore repository...")
+            FileUtils.cp(existing_keystore, keystore_path)
           end
 
           UI.message("Generating Keystore properties...")
-         
+
           if File.file?(properties_path)
             FileUtils.remove_dir(properties_path)
           end
-        
+
           # Build URL:
           store_file = git_url + '/' + package_name + '/' + keystore_name
 
@@ -601,16 +629,19 @@ module Fastlane
 
           # Print Keystore data in repo:
           keystore_info_path = File.join(keystoreAppDir, keystore_info_name)
-          `yes "" | keytool -list -v -keystore '#{keystore_path}' -storepass '#{key_password}' > '#{keystore_info_path}'`
-          
+          output = run_command("keytool", "-list", "-v",
+                               "-keystore", keystore_path,
+                               "-storepass", key_password)
+          File.write(keystore_info_path, output)
+
           UI.message("Upload new Keystore to remote repository...")
           puts ''
-          `cd '#{repo_dir}' && git add .`
-          `cd '#{repo_dir}' && git commit -m "[ADD] Keystore for app '#{package_name}'."`
-          `cd '#{repo_dir}' && git push`
+          run_command("git", "-C", repo_dir, "add", ".")
+          run_command("git", "-C", repo_dir, "commit", "-m", "[ADD] Keystore for app '#{package_name}'.")
+          run_command("git", "-C", repo_dir, "push")
           puts ''
 
-        else  
+        else
           UI.message "Keystore file already exists, continue..."
 
           self.decrypt_file(properties_encrypt_path, properties_path, key_path, false)
@@ -627,7 +658,7 @@ module Fastlane
         # Sign APK:
         if apk_path && File.file?(apk_path)
           UI.message("APK to sign: " + apk_path)
-        
+
           # Resolve path to the APK to sign:
           output_signed_apk = ''
           apk_path = self.resolve_apk_path(apk_path)
@@ -637,16 +668,16 @@ module Fastlane
             UI.message("Signing the APK...")
             puts ''
             output_signed_apk = self.sign_apk(
-              apk_path, 
-              keystore_path, 
-              key_password, 
-              alias_name, 
-              alias_password, 
+              apk_path,
+              keystore_path,
+              key_password,
+              alias_name,
+              alias_password,
               zip_align, # Zip align
               build_tools_version # Buil-tools version
             )
             puts ''
-          end 
+          end
 
           # Prepare contect shared values for next lanes:
           Actions.lane_context[SharedValues::MATCH_KEYSTORE_PATH] = keystore_path
@@ -667,14 +698,14 @@ module Fastlane
             UI.message("Signing the AAB...")
             puts ''
             output_signed_aab = self.sign_aab(
-              aab_path, 
-              keystore_path, 
-              key_password, 
-              alias_name, 
+              aab_path,
+              keystore_path,
+              key_password,
+              alias_name,
               alias_password
             )
             puts ''
-          end 
+          end
 
           # Prepare contect shared values for next lanes:
           Actions.lane_context[SharedValues::MATCH_KEYSTORE_PATH] = keystore_path
@@ -759,12 +790,12 @@ module Fastlane
                                    env_name: "MATCH_KEYSTORE_BUILD_TOOLS_VERSION",
                                 description: "Set built-tools version (by default latest available on machine)",
                                    optional: true,
-                                       type: String),      
+                                       type: String),
           FastlaneCore::ConfigItem.new(key: :zip_align,
                                    env_name: "MATCH_KEYSTORE_ZIPALIGN",
                                 description: "Define if plugin will run zipalign on APK before sign it (true by default)",
                                    optional: true,
-                                       type: Boolean),                    
+                                       type: Boolean),
           FastlaneCore::ConfigItem.new(key: :compat_key,
                                    env_name: "MATCH_KEYSTORE_COMPAT_KEY",
                                 description: "Define the compatibility key version used on local machine (nil by default)",
