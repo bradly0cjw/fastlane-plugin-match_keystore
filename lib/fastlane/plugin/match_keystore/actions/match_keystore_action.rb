@@ -14,6 +14,8 @@ module Fastlane
       MATCH_KEYSTORE_ALIAS_NAME = :MATCH_KEYSTORE_ALIAS_NAME
       MATCH_KEYSTORE_APK_SIGNED = :MATCH_KEYSTORE_APK_SIGNED
       MATCH_KEYSTORE_AAB_SIGNED = :MATCH_KEYSTORE_AAB_SIGNED
+      MATCH_KEYSTORE_PASSWORD = :MATCH_KEYSTORE_PASSWORD
+      MATCH_KEYSTORE_ALIAS_PASSWORD = :MATCH_KEYSTORE_ALIAS_PASSWORD
     end
 
     class MatchKeystoreAction < Action
@@ -326,7 +328,7 @@ module Fastlane
 
         # Set default AAB path if not set:
         if aab_path.to_s.strip.empty?
-          aab_path = File.join('app', 'build', 'outputs', 'bundle', 'release')
+          return nil
         end
 
         if !aab_path.to_s.end_with?('.aab')
@@ -354,7 +356,7 @@ module Fastlane
 
         # Set default APK path if not set:
         if apk_path.to_s.strip.empty?
-          apk_path = File.join('app', 'build', 'outputs', 'apk')
+          return nil
         end
 
         if !apk_path.to_s.end_with?(".apk")
@@ -404,6 +406,7 @@ module Fastlane
         build_tools_version = params[:build_tools_version]
         zip_align = params[:zip_align]
         compat_key = params[:compat_key]
+        skip_signing = params[:skip_signing]
 
         # Test OpenSSL/LibreSSL
         if unit_test
@@ -610,16 +613,27 @@ module Fastlane
           File.delete(properties_path)
         end
 
-        # Sign APK:
-        if apk_path && File.file?(apk_path)
-          UI.message("APK to sign: " + apk_path)
+        # Prepare context shared values for next lanes:
+        Actions.lane_context[SharedValues::MATCH_KEYSTORE_PATH] = keystore_path
+        Actions.lane_context[SharedValues::MATCH_KEYSTORE_ALIAS_NAME] = alias_name
+        Actions.lane_context[SharedValues::MATCH_KEYSTORE_PASSWORD] = key_password
+        Actions.lane_context[SharedValues::MATCH_KEYSTORE_ALIAS_PASSWORD] = alias_password
 
+        # Set Environment Variables for easy access in other tools (e.g. Flutter/Gradle)
+        ENV['MATCH_KEYSTORE_PATH'] = keystore_path
+        ENV['MATCH_KEYSTORE_ALIAS_NAME'] = alias_name
+        ENV['MATCH_KEYSTORE_PASSWORD'] = key_password
+        ENV['MATCH_KEYSTORE_ALIAS_PASSWORD'] = alias_password
+
+        # Sign APK:
+        if !skip_signing && !apk_path.to_s.strip.empty?
+        
           # Resolve path to the APK to sign:
-          output_signed_apk = ''
           apk_path = self.resolve_apk_path(apk_path)
 
-          if File.file?(keystore_path)
+          if apk_path && File.file?(apk_path) && File.file?(keystore_path)
 
+            UI.message("APK to sign: " + apk_path)
             UI.message("Signing the APK...")
             puts ''
             output_signed_apk = self.sign_apk(
@@ -632,24 +646,24 @@ module Fastlane
               build_tools_version # Buil-tools version
             )
             puts ''
-          end
+            
+            # Prepare contect shared values for next lanes:
+            Actions.lane_context[SharedValues::MATCH_KEYSTORE_APK_SIGNED] = output_signed_apk
+            return output_signed_apk
+          else
+            UI.important("APK file not found or invalid: #{apk_path}")
+          end 
+        end
 
-          # Prepare contect shared values for next lanes:
-          Actions.lane_context[SharedValues::MATCH_KEYSTORE_PATH] = keystore_path
-          Actions.lane_context[SharedValues::MATCH_KEYSTORE_ALIAS_NAME] = alias_name
-          Actions.lane_context[SharedValues::MATCH_KEYSTORE_APK_SIGNED] = output_signed_apk
-
-          output_signed_apk
         # Sign AAB
-        elsif aab_path && File.file?(aab_path)
-          UI.message('AAB to sign: '+ aab_path)
+        if !skip_signing && !aab_path.to_s.strip.empty?
 
           # Resolve path to the AAB to sign:
-          output_signed_aab = ''
           aab_path = self.resolve_aab_path(aab_path)
 
-          if File.file?(keystore_path)
+          if aab_path && File.file?(aab_path) && File.file?(keystore_path)
 
+            UI.message('AAB to sign: '+ aab_path)
             UI.message("Signing the AAB...")
             puts ''
             output_signed_aab = self.sign_aab(
@@ -660,17 +674,17 @@ module Fastlane
               alias_password
             )
             puts ''
-          end
 
-          # Prepare contect shared values for next lanes:
-          Actions.lane_context[SharedValues::MATCH_KEYSTORE_PATH] = keystore_path
-          Actions.lane_context[SharedValues::MATCH_KEYSTORE_ALIAS_NAME] = alias_name
-          Actions.lane_context[SharedValues::MATCH_KEYSTORE_AAB_SIGNED] = output_signed_aab
-
-          output_signed_aab
-        else
-          UI.message("No APK or AAB file found")
+            # Prepare contect shared values for next lanes:
+            Actions.lane_context[SharedValues::MATCH_KEYSTORE_AAB_SIGNED] = output_signed_aab
+            return output_signed_aab
+          else
+            UI.important("AAB file not found or invalid: #{aab_path}")
+          end 
         end
+
+        UI.message("No APK or AAB file to sign, or signing skipped.")
+        keystore_path
       end
 
       def self.description
@@ -689,6 +703,8 @@ module Fastlane
         [
           ['MATCH_KEYSTORE_PATH', 'File path of the Keystore fot the App.'],
           ['MATCH_KEYSTORE_ALIAS_NAME', 'Keystore Alias Name.'],
+          ['MATCH_KEYSTORE_PASSWORD', 'Keystore Password.'],
+          ['MATCH_KEYSTORE_ALIAS_PASSWORD', 'Keystore Alias Password.'],
           ['MATCH_KEYSTORE_APK_SIGNED', 'Path of the signed APK.'],
           ['MATCH_KEYSTORE_AAB_SIGNED', 'Path of the signed AAB.']
         ]
@@ -765,7 +781,13 @@ module Fastlane
                                    env_name: "MATCH_KEYSTORE_UNIT_TESTS",
                                 description: "launch Unit Tests (false by default)",
                                    optional: true,
-                                       type: Boolean)
+                                       type: Boolean),
+          FastlaneCore::ConfigItem.new(key: :skip_signing,
+                                   env_name: "MATCH_KEYSTORE_SKIP_SIGNING",
+                                description: "Skip signing the APK or AAB (false by default)",
+                                   optional: true,
+                                       type: Boolean,
+                              default_value: false)
         ]
       end
 
